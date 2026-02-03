@@ -1,0 +1,23 @@
+# Environment
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Output
+output/
+input/*
+!input/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+debug_processing.py
+test_blending.py
+test_crop_stitch.py 
+test_detection.py
