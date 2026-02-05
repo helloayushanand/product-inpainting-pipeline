@@ -282,7 +282,12 @@ class LayeredCompositor:
         print(f"  Applied lighting transfer from scene region")
         
         # Step 7: Feather alpha for smooth edges
-        alpha_feathered = self._feather_alpha(alpha, self.feather_amount)
+        # Calculate adaptive feathering map based on scene context
+        print(f"  Calculating adaptive feathering map (contour-based)...")
+        feather_map = self._calculate_adaptive_feather_map(alpha, scene_np, bbox)
+        
+        # Apply feathering using the map
+        alpha_feathered = self._feather_alpha(alpha, feather_map)
         
         # Step 8: Composite onto scene
         alpha_3d = np.stack([alpha_feathered] * 3, axis=2)
@@ -298,27 +303,143 @@ class LayeredCompositor:
         
         return Image.fromarray(result.astype(np.uint8))
     
-    def _feather_alpha(self, alpha: np.ndarray, amount: int) -> np.ndarray:
+    def _calculate_adaptive_feather_map(
+        self,
+        alpha: np.ndarray,
+        scene: np.ndarray,
+        bbox: Tuple[int, int, int, int]
+    ) -> np.ndarray:
+        """
+        Create a spatially varying feather map based on scene texture.
+        
+        Logic:
+        1. Find contour of the product.
+        2. Walk the contour: at each point, check variance of underlying scene.
+           - High Variance (sharp background) -> Low Feather (5px)
+           - Low Variance (blurry background) -> High Feather (50px)
+        3. Propagate these edge values inward using inpainting/nearest neighbor.
+        """
+        x, y, w, h = bbox
+        
+        # 1. Work at lower resolution for performance (e.g. max 512px dim)
+        scale = 512.0 / max(w, h)
+        if scale >= 1.0:
+            scale = 1.0
+            
+        small_w = int(w * scale)
+        small_h = int(h * scale)
+        
+        # Extract scene region corresponding to bbox
+        scene_roi = scene[y:y+h, x:x+w]
+        
+        # Resize inputs
+        alpha_small = cv2.resize(alpha, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+        scene_small = cv2.resize(scene_roi, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        
+        # Convert scene to gray for variance calc
+        if len(scene_small.shape) == 3:
+            scene_gray = cv2.cvtColor(scene_small, cv2.COLOR_RGB2GRAY)
+        else:
+            scene_gray = scene_small
+            
+        # 2. Find contours
+        # Ensure binary
+        _, alpha_bin = cv2.threshold(alpha_small, 0.5, 1.0, cv2.THRESH_BINARY)
+        alpha_u8 = (alpha_bin * 255).astype(np.uint8)
+        
+        contours, _ = cv2.findContours(alpha_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        
+        # Initialize sparse map (0 = unknown)
+        # We'll use a mask for inpainting: 0=known, 255=unknown to fill
+        # But cv2.inpaint expects the mask to be non-zero at pixels TO BE INPAINTED.
+        # So: Known pixels = 0 in mask. Unknown = 255.
+        
+        feather_sparse = np.zeros((small_h, small_w), dtype=np.float32)
+        inpaint_mask = np.ones((small_h, small_w), dtype=np.uint8) * 255
+        
+        min_feather = 5.0
+        max_feather = 50.0
+        
+        # 3. Walk contours
+        if contours:
+            # Flatten all contour points
+            points = np.vstack(contours).squeeze()
+            if len(points.shape) == 1: # Handle single point case
+                points = np.array([points])
+                
+            for pt in points:
+                px, py = pt
+                
+                # Check valid bounds
+                if px < 0 or px >= small_w or py < 0 or py >= small_h:
+                    continue
+                
+                # Sample window size (e.g. 20px at full res -> scaled down)
+                # Ensure at least 3x3 window
+                win_r = max(2, int(15 * scale))
+                
+                x1 = max(0, px - win_r)
+                y1 = max(0, py - win_r)
+                x2 = min(small_w, px + win_r + 1)
+                y2 = min(small_h, py + win_r + 1)
+                
+                patch = scene_gray[y1:y2, x1:x2]
+                
+                if patch.size == 0:
+                    val = max_feather
+                else:
+                    # Calculate Laplacian variance (sharpness)
+                    variance = cv2.Laplacian(patch, cv2.CV_64F).var()
+                    
+                    # Map variance to feather amount
+                    # High var (>500) -> Min feather
+                    # Low var (<50) -> Max feather
+                    # Log mapping might be better
+                    
+                    if variance > 500:
+                        val = min_feather
+                    elif variance < 50:
+                        val = max_feather
+                    else:
+                        # Linear interp between 50 and 500
+                        t = (variance - 50) / 450.0 # 0 to 1
+                        val = max_feather - t * (max_feather - min_feather)
+                        
+                feather_sparse[py, px] = val
+                inpaint_mask[py, px] = 0 # Mark as known
+                
+        # 4. Inpaint to fill the interior/exterior
+        # Linear inpainting is fast and creates smooth gradients
+        feather_map_small = cv2.inpaint(
+            feather_sparse, inpaint_mask, 3, cv2.INPAINT_TELEA
+        )
+        
+        # 5. Upscale back to full resolution
+        feather_map = cv2.resize(feather_map_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        
+        return feather_map
+
+    def _feather_alpha(self, alpha: np.ndarray, amount: np.ndarray) -> np.ndarray:
         """
         Apply feathering to alpha channel.
         
         Args:
             alpha: Alpha channel (0-1 float)
-            amount: Feather amount in pixels
+            amount: Feather amount map (float array same size as alpha) OR scalar
         
         Returns:
             Feathered alpha channel
         """
-        if amount <= 0:
-            return alpha
-        
         # Convert to uint8 for distance transform
         alpha_uint8 = (alpha * 255).astype(np.uint8)
         
-        # Distance transform from edges
+        # Distance transform from edges (calculates distance to nearest zero pixel)
         dist = cv2.distanceTransform(alpha_uint8, cv2.DIST_L2, 5)
         
+        # Max sure amount is not zero to avoid div by zero
+        safe_amount = np.maximum(amount, 1e-5)
+        
         # Normalize to feather amount
-        feathered = np.clip(dist / amount, 0, 1)
+        feathered = np.clip(dist / safe_amount, 0, 1)
         
         return feathered.astype(np.float32)
