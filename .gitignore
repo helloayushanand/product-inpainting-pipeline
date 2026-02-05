@@ -22,4 +22,5 @@ test_blending.py
 test_crop_stitch.py 
 test_detection.py
 test_layered.py
+debug_edges.py
 

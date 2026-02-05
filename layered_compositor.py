@@ -25,6 +25,71 @@ class LayeredCompositor:
         """
         self.feather_amount = feather_amount
     
+    
+    def transfer_lighting(
+        self,
+        product: np.ndarray,
+        scene_region: np.ndarray,
+        alpha: np.ndarray
+    ) -> np.ndarray:
+        """
+        Transfer lighting characteristics from scene region to product.
+        
+        Samples color temperature, brightness, and contrast from the scene
+        region where the product will be placed, then applies those
+        characteristics to the product.
+        
+        Args:
+            product: Product RGB (float32, 0-255)
+            scene_region: Scene region RGB (float32, 0-255)
+            alpha: Product alpha mask (float32, 0-1)
+        
+        Returns:
+            Product with adjusted lighting (float32, 0-255)
+        """
+        # Only analyze non-transparent product pixels
+        product_mask = alpha > 0.5
+        
+        if not np.any(product_mask):
+            return product
+        
+        # Get product pixels (only non-transparent)
+        product_pixels = product[product_mask]
+        
+        # Sample scene region (use all pixels)
+        scene_pixels = scene_region.reshape(-1, 3)
+        
+        # Calculate mean and std for each channel
+        product_mean = np.mean(product_pixels, axis=0)
+        product_std = np.std(product_pixels, axis=0)
+        
+        scene_mean = np.mean(scene_pixels, axis=0)
+        scene_std = np.std(scene_pixels, axis=0)
+        
+        print(f"  Product mean RGB: {product_mean.astype(int)}")
+        print(f"  Scene mean RGB: {scene_mean.astype(int)}")
+        
+        # Apply color transfer (Reinhard color transfer)
+        # Normalize product to zero mean, unit variance
+        product_adjusted = product.copy()
+        
+        for c in range(3):
+            if product_std[c] > 0:
+                # Normalize
+                product_adjusted[:, :, c] = (product[:, :, c] - product_mean[c]) / product_std[c]
+                # Scale to scene statistics
+                product_adjusted[:, :, c] = product_adjusted[:, :, c] * scene_std[c] + scene_mean[c]
+        
+        # Clip to valid range
+        product_adjusted = np.clip(product_adjusted, 0, 255)
+        
+        # Blend adjusted product with original based on alpha
+        # Keep original in transparent areas
+        alpha_3d = np.stack([alpha] * 3, axis=2)
+        product_final = alpha_3d * product_adjusted + (1 - alpha_3d) * product
+        
+        return product_final
+    
     def remove_background(self, image: Image.Image, threshold: int = 245) -> Image.Image:
         """
         Remove white/light background from product image.
@@ -210,19 +275,23 @@ class LayeredCompositor:
             canvas_rgb = canvas_scaled
             alpha = np.ones((h, w), dtype=np.float32)
         
-        # Step 6: Feather alpha for smooth edges
+        # Step 6: Transfer lighting from scene region to product
+        scene_region = scene_np[y:y+h, x:x+w].astype(np.float32)
+        canvas_rgb_lit = self.transfer_lighting(canvas_rgb, scene_region, alpha)
+        print(f"  Applied lighting transfer from scene region")
+        
+        # Step 7: Feather alpha for smooth edges
         alpha_feathered = self._feather_alpha(alpha, self.feather_amount)
         
-        # Step 7: Composite onto scene
-        scene_region = scene_np[y:y+h, x:x+w].astype(np.float32)
+        # Step 8: Composite onto scene
         alpha_3d = np.stack([alpha_feathered] * 3, axis=2)
         
         blended = (
-            alpha_3d * canvas_rgb +
+            alpha_3d * canvas_rgb_lit +
             (1 - alpha_3d) * scene_region
         )
         
-        # Step 8: Place back into scene
+        # Step 9: Place back into scene
         result = scene_np.copy()
         result[y:y+h, x:x+w] = blended.astype(np.uint8)
         
