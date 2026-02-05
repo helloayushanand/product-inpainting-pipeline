@@ -11,15 +11,15 @@ from compositor import Compositor
 # ============================================
 # CONFIGURATION - Edit these values
 # ============================================
-PRODUCT_IMAGE_PATH = "/Users/ayush/Downloads/390432_media_swatch_0_17-12-25-08-45-19.jpeg"  # Path to your product image
-SCENE_PROMPT = "place this on a table near the window. it must look like a real life lifestyle shot of this product."  # Scene description
+PRODUCT_IMAGE_PATH = "/Users/ayush/Downloads/390432_media_swatch_0_17-12-25-08-45-19__1_-removebg-preview.png"  # Path to your product image
+SCENE_PROMPT = "place this on a table near the window. it must look like a real life lifestyle shot of this product. do not change any deatails of the product. The product should be kept in the center of the image."  # Scene description
 MATCHING_METHOD = "feature"  # "template" or "feature"
 OUTPUT_PATH = None  # None = auto (output/3_final_composite.jpg), or specify custom path
 # ============================================
 
 
 class Pipeline:
-    def __init__(self, matching_method: str = "template"):
+    def __init__(self, matching_method: str = "feature"):
         """
         Initialize the pipeline.
         
@@ -28,7 +28,9 @@ class Pipeline:
         """
         self.generator = GeminiGenerator()
         self.matcher = ProductMatcher(method=matching_method)
-        self.compositor = Compositor()
+        # Use LayeredCompositor for better quality
+        from layered_compositor import LayeredCompositor
+        self.compositor = LayeredCompositor(feather_amount=30)
     
     def run(
         self, 
@@ -51,8 +53,8 @@ class Pipeline:
         print("PRODUCT PLACEMENT PIPELINE")
         print("=" * 60)
         
-        # Step 1: Generate scene with product
-        print("\n[1/3] Generating scene with Gemini...")
+        # Step 1: Generate scene with product (4K)
+        print("\n[1/3] Generating 4K scene with Gemini...")
         generated_scene = self.generator.generate_scene(product_image_path, scene_prompt)
         print(f"✓ Generated scene: {generated_scene.size}")
         
@@ -61,18 +63,21 @@ class Pipeline:
         generated_scene.save(intermediate_path)
         print(f"  Saved to: {intermediate_path}")
         
-        # Step 2: Find product location
+        # Step 2: Find product location with homography
         print("\n[2/3] Finding product location...")
         original_product = Image.open(product_image_path)
-        bbox = self.matcher.find_product_location(original_product, generated_scene)
+        result = self.matcher.find_product_location(original_product, generated_scene)
         
-        if bbox is None:
+        if result is None:
             print("✗ Could not find product in generated scene!")
             print("  Try adjusting the prompt or using a different matching method.")
             return generated_scene
         
+        bbox, homography = result
         x, y, w, h = bbox
         print(f"✓ Found product at: x={x}, y={y}, w={w}, h={h}")
+        if homography is not None:
+            print(f"  Homography matrix available for precise placement")
         
         # Save detection visualization
         import cv2
@@ -83,9 +88,15 @@ class Pipeline:
         Image.fromarray(scene_with_box).save(detection_path)
         print(f"  Saved detection to: {detection_path}")
         
-        # Step 3: Composite original product
-        print("\n[3/3] Compositing original product...")
-        final_image = self.compositor.paste_product(original_product, generated_scene, bbox)
+        # Step 3: Composite with layered approach + lighting transfer
+        print("\n[3/3] Compositing with lighting transfer...")
+        final_image = self.compositor.composite(
+            original_product, 
+            generated_scene, 
+            bbox,
+            homography=homography,
+            remove_bg=True
+        )
         print(f"✓ Composite complete: {final_image.size}")
         
         # Save final result
