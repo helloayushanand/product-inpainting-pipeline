@@ -157,8 +157,9 @@ class LayeredCompositor:
         
         # Step 1: Remove background if needed
         if remove_bg:
-            product = self.remove_background(product)
-            print(f"  Background removed")
+            # User requested to disable automatic removal for now
+            # product = self.remove_background(product)
+            print(f"  Background removal SKIPPED (user request)")
         
         product_np = np.array(product).astype(np.float32)
         product_h, product_w = product_np.shape[:2]
