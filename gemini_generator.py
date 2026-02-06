@@ -14,19 +14,24 @@ class GeminiGenerator:
         
         self.client = genai.Client(api_key=self.api_key)
     
-    def generate_scene(self, product_image_path: str, scene_prompt: str) -> Image.Image:
+    def generate_scene(self, product_image_path, scene_prompt: str) -> Image.Image:
         """
         Generate a scene with the product in it.
         
         Args:
-            product_image_path: Path to the original product image
+            product_image_path: Path to the original product image (str) or PIL Image object
             scene_prompt: Description of the scene (e.g., "A bottle on a wooden table in a cafe")
         
         Returns:
             PIL Image of the generated scene
         """
-        # Load the product image
-        product_img = Image.open(product_image_path)
+        # Load the product image (support both path and Image object)
+        if isinstance(product_image_path, (str, bytes)):
+            product_img = Image.open(product_image_path)
+        elif isinstance(product_image_path, Image.Image):
+            product_img = product_image_path
+        else:
+            raise TypeError(f"product_image_path must be str or PIL Image, got {type(product_image_path)}")
         
         # Create the full prompt
         full_prompt = f"""Generate a photorealistic image based on this description: {scene_prompt}
