@@ -41,7 +41,7 @@ Generate realistic shadows and lighting that match the environment."""
             contents=[full_prompt, product_img],
             config=types.GenerateContentConfig(
                 response_modalities=['IMAGE'],
-                image_config=types.ImageConfig(image_size="4K"),
+                image_config=types.ImageConfig(image_size="2K"),
             )
         )
         
